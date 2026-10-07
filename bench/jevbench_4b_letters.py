@@ -33,7 +33,7 @@ def option_text(task, label):
 
 
 def main():
-    tasks = [json.loads(l) for l in open("/tmp/jevbench_all.jsonl", encoding="utf-8") if l.strip()]
+    tasks = [json.loads(line) for line in open("/tmp/jevbench_all.jsonl", encoding="utf-8") if line.strip()]
     model, tokenizer = load(MODEL)
     print(f"{len(tasks)} tasks; model loaded", flush=True)
 
@@ -77,7 +77,7 @@ def main():
             picked -= picked.max()
             weights = mx.exp(picked)
             probs = (weights / weights.sum()).tolist()
-            by_label = dict(zip(labels, probs))
+            by_label = dict(zip(labels, probs, strict=True))
             predicted = max(by_label, key=by_label.get)
             ok = predicted == t["expected"]
             correct.append(ok)
