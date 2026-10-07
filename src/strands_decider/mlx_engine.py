@@ -253,11 +253,12 @@ def _snapshot(layer: Any) -> Any:
     carrying the same keys/values merges as often as needed. `ArraysCache.merge` (the
     Gated DeltaNet states) already returns a re-mergeable cache and passes through.
     """
-    merged = type(layer).merge([layer])
+    merged: Any = type(layer).merge([layer])  # Any: mlx-lm's cache stubs type keys as None
     if type(merged) is BatchKVCache and type(layer) is not BatchKVCache:
         plain = KVCache()
         plain.keys, plain.values = merged.keys, merged.values
-        plain.offset = int(merged.keys.shape[2])  # the batch-1 seq length: the cached token count
+        keys: Any = merged.keys  # Any: the type() narrowing above re-types merged from mlx-lm's stubs
+        plain.offset = int(keys.shape[2])  # the batch-1 seq length: the cached token count
         return plain
     return merged
 
