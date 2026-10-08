@@ -244,7 +244,8 @@ src/strands_decider/
   evaluate.py     accuracy, ECE, NLL, MAE; temperature fitting; calib/test split
   infer.py        serving engine; shared-state cache, including hybrid torsos
   mps_kernels.py  Gated DeltaNet chunk rule for Apple-silicon serving (no fla on macOS)
-  mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
+  mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's,
+                  plus a cross-request state cache (ADR-004)
   server.py       FastAPI, POST /v1/systemone
   cli.py          the strands-decider command
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)

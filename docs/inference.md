@@ -185,7 +185,9 @@ strands-decider serve checkpoints/hobson-2b-recipe --port 8000
 targets this endpoint and runs against it unmodified: 231 of 231 tasks attempted and
 schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-benchmark-jevbench-v1-public-set)).
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
-name, the checkpoint path, the base model, the device and the calibration temperature.
+name, the checkpoint path, the base model, the number of slots, the maximum length, the
+device, the calibration temperature, whether the prefix cache is on, the MLX state-cache
+size (`null` off MLX) and whether the vision tower is kept.
 
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
@@ -304,3 +306,16 @@ trainable token embeddings, per-module ranks and quantised base weights. `--dtyp
 (`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
 Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
 `_option_idx` to read; the torch engine has the same race (#9).
+
+### The cross-request state cache
+
+`--state-cache N` (default 8, `0` disables) caches a batch-1 snapshot of the prompt cache
+per state, keyed by the state's token ids, so a repeated state skips its forward entirely —
+including from the single-question path. The cache is an LRU; size it above the number of
+distinct states a client cycles through, or entries evict each other. Only the shared-prefix
+path populates it, and it already builds a state-only prefix, so no request pays an extra
+forward to fill an entry. The design, and the measured 5.2× over uncached repeats, are in
+[ADR-004](../adr/ADR-004-cross-request-state-cache.md); `ARCHITECTURE.md` carries the local
+end-to-end numbers. To measure it yourself, start the server and run the benchmark suite:
+`bash bench/run.sh` (see each script's `--help`; `bench_all.py --only concurrency` for the
+concurrency section alone).
