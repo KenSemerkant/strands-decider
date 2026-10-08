@@ -6,6 +6,8 @@ __pycache__/
 
 # Training artefacts
 checkpoints/
+# Benchmark run output teed by bench/run.sh (regression history, never committed)
+bench/results/
 # Recursive: generated corpora also land in subdirectories (data/para/, ...)
 data/**/*.jsonl
 data/**/*.jsonl.gz
