@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -222,6 +223,75 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
     with ThreadPoolExecutor(1) as pool:
         response = pool.submit(engine.evaluate, REQUESTS[1]).result()
     assert set(response.answers) == set(QUESTIONS)
+
+
+def _interleave_pair():
+    """Two requests whose engine-parked option offsets would corrupt each other.
+
+    The same two questions in a different order: each question's own offsets are
+    unchanged, but the engine-level list is reordered, so a request reading the
+    other's parked list scores every question at the other question's positions.
+    """
+    a = SystemOneRequest(state=POLICY + "Can I renew the cookbook?",
+                         questions={"team": QUESTIONS["team"], "mood": QUESTIONS["mood"]})
+    b = SystemOneRequest(state=POLICY * 6 + "My renewal failed and I leave Friday!",
+                         questions={"mood": QUESTIONS["mood"], "team": QUESTIONS["team"]})
+    return a, b
+
+
+@pytest.mark.parametrize("use_prefix_cache", [True, False])
+def test_interleaved_evaluations_keep_their_own_option_offsets(tmp_path, use_prefix_cache):
+    # Race #9: `_fit` parked a request's option offsets on the engine for `_option_idx`
+    # to read back, so a request whose `_fit` ran between another's `_fit` and
+    # `_option_idx` replaced them. The torch engine serves the server's thread pool
+    # unguarded. `_pad` sits between the two calls on both of `evaluate`'s paths, so a
+    # barrier there forces exactly that interleaving, deterministically.
+    engine = load_engine(str(_checkpoint(tmp_path, "pointer")), device="cpu",
+                         use_prefix_cache=use_prefix_cache)
+    a, b = _interleave_pair()
+    want_a = _probabilities(engine.evaluate(a))
+    want_b = _probabilities(engine.evaluate(b))
+
+    barrier = threading.Barrier(2)
+    inner = engine._pad
+
+    def rendezvous(seqs):
+        barrier.wait()
+        return inner(seqs)
+
+    engine._pad = rendezvous
+    try:
+        with ThreadPoolExecutor(2) as pool:
+            first = pool.submit(engine.evaluate, a)
+            second = pool.submit(engine.evaluate, b)
+            got_a = _probabilities(first.result())
+            got_b = _probabilities(second.result())
+    finally:
+        del engine._pad
+    for name in want_a:
+        assert got_a[name] == pytest.approx(want_a[name], abs=1e-4), name
+    for name in want_b:
+        assert got_b[name] == pytest.approx(want_b[name], abs=1e-4), name
+
+
+def test_mlx_interleaved_evaluations_stay_correct(tmp_path):
+    # MLXEngine serialises whole evaluations (`_lock` around `evaluate`: the decoder
+    # and the Metal buffer cache are shared per engine), so interleaved requests must
+    # each still see their own option offsets -- pinned here so the lock, not luck,
+    # keeps MLX correct while the torch engine runs unlocked.
+    engine = load_engine(str(_checkpoint(tmp_path, "pointer")), device="mlx")
+    a, b = _interleave_pair()
+    want_a = _probabilities(engine.evaluate(a))
+    want_b = _probabilities(engine.evaluate(b))
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(engine.evaluate, a)
+        second = pool.submit(engine.evaluate, b)
+        got_a = _probabilities(first.result())
+        got_b = _probabilities(second.result())
+    for name in want_a:
+        assert got_a[name] == pytest.approx(want_a[name], abs=1e-4), name
+    for name in want_b:
+        assert got_b[name] == pytest.approx(want_b[name], abs=1e-4), name
 
 
 # ---- the cross-request state cache -----------------------------------------
