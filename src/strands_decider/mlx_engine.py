@@ -29,7 +29,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import torch
@@ -87,7 +87,8 @@ def merge_lora(lm: Any, adapter_dir: str, prefix: str) -> int:
     unsupported = [key for key in ("fan_in_fan_out", "rank_pattern", "alpha_pattern") if cfg.get(key)]
     if unsupported:
         raise ValueError(f"{adapter_dir}: the MLX backend cannot merge an adapter with {unsupported}")
-    adapter = mx.load(os.path.join(adapter_dir, "adapter_model.safetensors"))
+    # A .safetensors load is always the weight dict; mx.load's return also covers .npy/gguf.
+    adapter = cast("dict[str, mx.array]", mx.load(os.path.join(adapter_dir, "adapter_model.safetensors")))
     stems = {name.removesuffix(".lora_A.weight") for name in adapter if name.endswith(".lora_A.weight")}
     expected = {stem + suffix for stem in stems for suffix in (".lora_A.weight", ".lora_B.weight")}
     if set(adapter) != expected:
@@ -128,7 +129,8 @@ class MLXEngine(SystemOneEngine):
         # attributes the inherited helpers read; `device` is where their small index and
         # temperature tensors live, next to the head.
         self.cfg = config
-        self.model = readout
+        # The readout stands in for the torch model the inherited helpers expect.
+        self.model = readout  # type: ignore[assignment]
         self.tok = readout.tokenizer
         self.device = "cpu"
         self._decoder = decoder
@@ -275,17 +277,20 @@ def _load_torso(base: Path, dtype: str) -> tuple[Any, Any, Any, str]:
         model_type = json.load(fh)["model_type"]
     overrides = {"model_type": _MODEL_TYPES[model_type]} if model_type in _MODEL_TYPES else None
     lm, _ = load_model(base, model_config=overrides)
-    owner = getattr(lm, "language_model", lm)  # multimodal checkpoints keep the text model here
+    # Multimodal checkpoints keep the text model here; mlx-lm gives no typed handle on it.
+    owner: Any = getattr(lm, "language_model", lm)
     prefix = "language_model.model." if owner is not lm else "model."
     if dtype not in _DTYPES:
         raise ValueError(f"the MLX backend has no dtype {dtype!r}; use one of {sorted(_DTYPES)}")
     # The checkpoint's dtype, as torch loads it; mlx-lm's predicate keeps e.g. A_log in fp32.
     keep = getattr(owner, "cast_predicate", None) or (lambda _path: True)
     target = _DTYPES[dtype]
-    cast = [(path, value.astype(target)) for path, value in tree_flatten(lm.parameters())
-            if mx.issubdtype(value.dtype, mx.floating) and value.dtype != target and keep(path)]
-    if cast:
-        lm.load_weights(cast, strict=False)
+    # tree_flatten's signature also allows a dict destination; with a list it returns pairs.
+    recast = [(path, value.astype(target))
+              for path, value in cast("list[tuple[str, Any]]", tree_flatten(lm.parameters()))
+              if mx.issubdtype(value.dtype, mx.floating) and value.dtype != target and keep(path)]
+    if recast:
+        lm.load_weights(recast, strict=False)
     # Evaluate the casts now: a lazy array belongs to this thread's stream, and the server
     # evaluates requests on its thread pool.
     mx.eval(lm.parameters())

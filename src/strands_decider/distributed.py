@@ -31,7 +31,7 @@ import functools
 import os
 from collections.abc import Callable, Iterator
 from datetime import timedelta
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import torch
 import torch.distributed as dist
@@ -236,8 +236,10 @@ class StepSlices:
 
     def __init__(self, loader: DataLoader, kl_slots: int, grad_accum: int, total_steps: int):
         self.loader = loader
-        self.examples = loader.dataset.examples
-        self.collate = loader.collate_fn
+        # The loader holds an ExampleDataset; torch types DataLoader.dataset only as Dataset.
+        self.examples = cast(Any, loader.dataset).examples
+        # A SystemOneCollator, which also has .skip() to advance its random stream.
+        self.collate: Any = loader.collate_fn
         self.grad_accum = grad_accum
         self.rank, _, self.world = env()
         self.lengths = [example_length(ex) for ex in self.examples]
@@ -264,7 +266,7 @@ class StepSlices:
             # sampler takes its seed from the global torch RNG), then broadcast. Rank 0's
             # global RNG stays where one GPU's is because rank 0 also runs every
             # validation pass, whose loader draws from it too: keep it that way.
-            order[0] = list(DataLoader(range(len(self.examples)),
+            order[0] = list(DataLoader(range(len(self.examples)),  # type: ignore[arg-type]  # any sized iterable works; the stub insists on a Dataset
                                        batch_sampler=self.loader.batch_sampler, collate_fn=list))
         dist.broadcast_object_list(order, src=0)
         for idx in order[0]:

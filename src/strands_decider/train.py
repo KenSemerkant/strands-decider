@@ -185,7 +185,7 @@ def _lr_lambda(step: int, warmup: int, total: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
-@torch.no_grad()  # type: ignore[untyped-decorator]
+@torch.no_grad()
 def evaluate_loss(
     model: StrandsDeciderModel, loader: DataLoader, device: str, max_batches: int = 50
 ) -> dict[str, float]:
@@ -330,7 +330,7 @@ def train(cfg: TrainConfig) -> str:
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
     if cfg.gradient_checkpointing and not (cfg.freeze_torso or cfg.init_from):
-        base = getattr(model.torso, "base_model", model.torso)
+        base: Any = getattr(model.torso, "base_model", model.torso)
         inner = getattr(base, "model", base)
         if hasattr(inner, "gradient_checkpointing_enable"):
             # use_reentrant=False is required for checkpointing to coexist with LoRA:
@@ -446,8 +446,10 @@ def train(cfg: TrainConfig) -> str:
             json.dump(asdict(cfg), fh, indent=2)
     slots = model.slot_token_ids()  # the rows frozen_slot_log_probs covers
     kl_slots = max(slots) + 1 if slots else 0
+    # What the epoch loop draws from: the one-GPU loader, or each rank's share of its rows.
+    batches: DataLoader | distributed.StepSlices = train_loader
     if world > 1:  # each rank iterates its share of every step's rows instead
-        train_loader = distributed.StepSlices(train_loader, kl_slots, cfg.grad_accum, total_steps)
+        batches = distributed.StepSlices(train_loader, kl_slots, cfg.grad_accum, total_steps)
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
@@ -472,7 +474,7 @@ def train(cfg: TrainConfig) -> str:
     for epoch in range(cfg.epochs):
         if done:
             break
-        for batch in train_loader:
+        for batch in batches:
             # Under torchrun a forward is this rank's slice of a micro-batch (distributed.py).
             part = batch.pop("part", distributed.WHOLE)
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}

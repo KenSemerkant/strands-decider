@@ -95,7 +95,7 @@ def load(model_id: str, revision: str) -> tuple[Any, Any]:
 
     tok = transformers.AutoTokenizer.from_pretrained(model_id, revision=revision)
     config = transformers.AutoConfig.from_pretrained(model_id, revision=revision)
-    cls = transformers.AutoModelForCausalLM
+    cls: Any = transformers.AutoModelForCausalLM
     if config.model_type in {"qwen3_5", "qwen3_5_text"}:
         # A multimodal checkpoint; load only the text tower, as SemIf's loader does.
         # Right padding stays exact for its recurrent (Gated DeltaNet) layers: the pads
