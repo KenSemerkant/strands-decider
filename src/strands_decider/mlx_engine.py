@@ -141,9 +141,13 @@ class MLXEngine(SystemOneEngine):
         self.state_cache_entries = state_cache_entries
         self._state_cache: OrderedDict[tuple[int, ...], list[Any]] = OrderedDict()
         self.state_encodes = 0  # state-only forwards served, cache or not
-        # One evaluation at a time: `_fit` leaves the request's option offsets on the engine
-        # (`_last_offsets`) for `_option_idx` to read, so two requests in the server's thread
-        # pool would read each other's. The torch engine has the same race (#9).
+        # One evaluation at a time. Not for request state -- option offsets travel with
+        # the request since race #9 was fixed, and the torch engine runs the same code
+        # unlocked -- but because the MLX forward path is shared per engine:
+        # `self._decoder`'s lazy arrays belong to this thread's stream, the Metal buffer
+        # cache behind them is process-wide, and nothing in mlx-lm promises a reentrant
+        # model call. Holding this lock through `evaluate` also guards `_state_cache`
+        # and `state_encodes`, so they need no lock of their own.
         self._lock = threading.Lock()
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
@@ -183,11 +187,14 @@ class MLXEngine(SystemOneEngine):
             logits = apply_temperature(raw, self._temperatures(kinds))
             return masked_log_softmax(logits, torch.tensor(n_slots)).exp()
 
-    def _option_positions(self, rendered: list[RenderedQuestion] | None, base: int) -> torch.Tensor | None:
+    def _option_positions(
+        self, rendered: list[RenderedQuestion] | None, base: int,
+        offsets: list[list[tuple[int, int]]],
+    ) -> torch.Tensor | None:
         if self.model.config.head_type != "pointer":
             return None
         assert rendered is not None
-        return self._option_idx(rendered, base)
+        return self._option_idx(rendered, base, offsets)
 
     def _state_snapshot(self, state: list[int]) -> list[Any] | None:
         """The cached batch-1 prompt-cache layers for this state, or None. LRU-touched."""
@@ -201,7 +208,7 @@ class MLXEngine(SystemOneEngine):
         self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions = self._fit(state_text, question_texts)
+        state, questions, offsets = self._fit(state_text, question_texts)
         snap = self._state_snapshot(state) if self.state_cache_entries else None
         if snap is not None:
             # A cached state serves even one question through the suffix-only path: the
@@ -210,19 +217,19 @@ class MLXEngine(SystemOneEngine):
             batch = [type(layer).merge([layer] * len(questions)) for layer in snap]
             hidden = self._hidden(questions, batch)
             probs = self._probs(hidden, [len(question) - 1 for question in questions],
-                                self._option_positions(rendered, 0), n_slots, kinds)
+                                self._option_positions(rendered, 0, offsets), n_slots, kinds)
             return probs, len(state) + sum(len(question) for question in questions)
         rows = [state + question for question in questions]
         hidden = self._hidden(rows)
         probs = self._probs(hidden, [len(row) - 1 for row in rows],
-                            self._option_positions(rendered, len(state)), n_slots, kinds)
+                            self._option_positions(rendered, len(state), offsets), n_slots, kinds)
         return probs, sum(len(row) for row in rows)
 
     def _slot_probs_shared_prefix(
         self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions = self._fit(state_text, question_texts)
+        state, questions, offsets = self._fit(state_text, question_texts)
         snap = self._state_snapshot(state) if self.state_cache_entries else None
         if snap is None:
             prefix = make_prompt_cache(self._cache_owner)
@@ -240,7 +247,7 @@ class MLXEngine(SystemOneEngine):
         batch = [type(layer).merge([layer] * len(questions)) for layer in snap]
         hidden = self._hidden(questions, batch)
         probs = self._probs(hidden, [len(question) - 1 for question in questions],
-                            self._option_positions(rendered, 0), n_slots, kinds)
+                            self._option_positions(rendered, 0, offsets), n_slots, kinds)
         return probs, len(state) + sum(len(question) for question in questions)
 
 

@@ -166,8 +166,14 @@ class SystemOneEngine:
         )
 
 
-    def _fit(self, state_text: str, question_texts: list[str]) -> tuple[list[int], list[list[int]]]:
+    def _fit(
+        self, state_text: str, question_texts: list[str]
+    ) -> tuple[list[int], list[list[int]], list[list[tuple[int, int]]]]:
         """Tokenise state and questions, giving the QUESTION first claim on the window.
+
+        Returns the state ids, the question ids, and each question's character-to-token
+        offset mapping -- request-scoped, returned rather than parked on the engine, so
+        two evaluations can interleave in the server's thread pool (race #9).
 
         The question and its options are what make a task answerable; the state is the
         part that can be sampled. Letting the state take the window first meant a long
@@ -195,14 +201,13 @@ class SystemOneEngine:
                     f"prompt of {len(s) + longest} tokens exceeds the context window "
                     f"of {max_len} tokens"
                 )
-            self._last_offsets = list(offs)
-            return s, q
+            return s, q, list(offs)
         # Cap the reserve so a pathological question cannot starve the state entirely.
         reserve = min(longest, max(1, int(max_len * self.cfg.max_question_fraction)))
         # Front truncation shifts every token index, so the offsets move with the ids
         # and a pointer readout keeps pointing at the right option.
         cut = [max(0, len(x) - reserve) for x in q]
-        self._last_offsets = [o[c:] for o, c in zip(offs, cut, strict=True)]
+        offsets = [o[c:] for o, c in zip(offs, cut, strict=True)]
         q = [x[c:] for x, c in zip(q, cut, strict=True)]
         state_budget = max(1, max_len - reserve)
         s = self.tok(
@@ -211,18 +216,22 @@ class SystemOneEngine:
             truncation=True,
             max_length=state_budget,
         )["input_ids"]
-        return s, q
+        return s, q, offsets
 
-    def _option_idx(self, rendered: list[RenderedQuestion], base: int) -> torch.Tensor:
+    def _option_idx(
+        self, rendered: list[RenderedQuestion], base: int,
+        offsets: list[list[tuple[int, int]]],
+    ) -> torch.Tensor:
         """Option token positions for a pointer head, offset by `base`.
 
         `base` is 0 when the caller forwards only the question (the shared-prefix path,
         where `hidden` is the suffix) and the state's token count when it forwards the
-        whole prompt. Uses the offsets `_fit` kept, so front truncation is accounted for.
+        whole prompt. Uses the offsets `_fit` returned, so front truncation is accounted
+        for.
         """
         rows = [
             _option_token_index(offs, rq.option_spans, 0)
-            for rq, offs in zip(rendered, self._last_offsets, strict=True)
+            for rq, offs in zip(rendered, offsets, strict=True)
         ]
         width = max(len(r) for r in rows)
         return torch.tensor(
@@ -258,11 +267,11 @@ class SystemOneEngine:
         `<answer>` marker the head pools at. Now it shares `_fit` with the cached path,
         so both truncate the same thing in the same direction.
         """
-        s, q = self._fit(state_text, question_texts)
+        s, q, offsets = self._fit(state_text, question_texts)
         ids, mask = self._pad([s + qi for qi in q])
         # This path forwards the whole prompt, so option positions sit after the state.
         assert rendered is not None or self.model.config.head_type != "pointer"
-        opt_idx = (self._option_idx(rendered, len(s))  # type: ignore[arg-type]
+        opt_idx = (self._option_idx(rendered, len(s), offsets)  # type: ignore[arg-type]
                    if self.model.config.head_type == "pointer" else None)
         out = self.model(
             input_ids=ids,
@@ -286,7 +295,7 @@ class SystemOneEngine:
         m = len(question_texts)
         # The suffixes continue an already-tokenised sequence, so _fit adds no BOS to
         # them -- one mid-sequence would be a token training never saw.
-        s, q = self._fit(state_text, question_texts)
+        s, q, offsets = self._fit(state_text, question_texts)
         prefix_ids = torch.tensor([s], device=self.device)
         prefix_len = prefix_ids.size(1)
 
@@ -322,7 +331,7 @@ class SystemOneEngine:
             from .modeling import gather_options
 
             assert rendered is not None
-            options = gather_options(hidden, self._option_idx(rendered, 0))
+            options = gather_options(hidden, self._option_idx(rendered, 0, offsets))
             raw = self.model.head(pooled, options.to(torch.float32))
         else:
             raw = self.model.head(pooled)

@@ -287,7 +287,7 @@ def test_long_state_keeps_its_head_and_the_images(engines):
         eng = _small_window(vision, 700, strict=False)
         state = "First words stay. " + "filler " * 200 + "Last words go."
         img = [fit_image(decode_image(_b64(320, 320, 4)), 448)]
-        s, _, _ = eng._fit_images(state, img, [render_question(QUESTIONS["signed"]).text])
+        s, _, _, _ = eng._fit_images(state, img, [render_question(QUESTIONS["signed"]).text])
         assert s.count(eng.tok.convert_tokens_to_ids(IMAGE_PAD)) == 100  # the image is whole
         kept = eng.tok.decode(s)
         assert "First words stay." in kept and "Last words go." not in kept
