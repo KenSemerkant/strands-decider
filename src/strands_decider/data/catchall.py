@@ -84,7 +84,7 @@ def build(examples: list[Example], tasks: Iterable[str], per_task: int, seed: in
     return out
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     import argparse
 
     from ..evaluate import partition_examples

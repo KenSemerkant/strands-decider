@@ -163,7 +163,7 @@ def _sharc_examples(rows: Iterable[dict]) -> list[Example]:
     return out
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     import argparse
 
     from transformers import AutoTokenizer

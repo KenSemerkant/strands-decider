@@ -122,7 +122,7 @@ def paraphrase_pairs(examples: list[Example], table: dict) -> list[Example]:
     return out
 
 
-def attach_main(args: argparse.Namespace) -> None:
+def attach_main(args: argparse.Namespace) -> None:  # pragma: no cover - CLI glue over tested parts
     """`--attach`: paraphrases onto an already built file, rows and order untouched, and
     with `--attach-eval`, the paired consistency eval from an already built eval file.
     This is how v20's files were made from the exact files v16-v19 used."""
@@ -139,7 +139,7 @@ def attach_main(args: argparse.Namespace) -> None:
         print(f"{args.pairs_out}: {len(pairs) // 2:,} eval rows from {args.attach_eval}, each with one paraphrase")
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     import argparse
 
     from .format import write_jsonl

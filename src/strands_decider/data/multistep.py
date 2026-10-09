@@ -210,7 +210,7 @@ def fits(examples: list[Example], tokenizer: Any, max_tokens: int) -> list[Examp
             if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens]
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     import argparse
 
     from datasets import load_dataset

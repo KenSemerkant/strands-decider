@@ -184,7 +184,7 @@ def build(
     return kept, made
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     ap = argparse.ArgumentParser(description="Build question-varied corpora (v11 arms).")
     ap.add_argument("--src", default="data/train_v5.jsonl")
     ap.add_argument("--fraction", type=float, default=0.3)

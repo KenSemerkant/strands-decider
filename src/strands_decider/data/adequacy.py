@@ -72,7 +72,7 @@ def to_example(r: dict) -> Example:
                    label=int(bool(verdict(r))), task=TASK, instruction_variants=list(VARIANTS))
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # pragma: no cover - CLI glue over tested parts
     import argparse
 
     from transformers import AutoTokenizer
