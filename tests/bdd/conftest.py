@@ -69,6 +69,52 @@ def client(monkeypatch):
     return TestClient(app)
 
 
+class _GuardModelCfg:
+    base_model = "stub"
+    num_slots = 24
+    max_length = 512
+    head_type = "fixed"
+
+
+class _NoParamTorso:
+    """A torso with no parameters: skips the CPU fp32 upcast in __init__."""
+
+    def parameters(self):  # noqa: ANN201
+        return iter([])
+
+
+class _GuardModel:
+    """Just enough of StrandsDeciderModel for SystemOneEngine.__init__ and the
+    slot-ceiling guard in evaluate(); the guard fires before any torch call."""
+
+    config = _GuardModelCfg()
+    tokenizer = None
+    torso = _NoParamTorso()
+
+    def to(self, device):  # noqa: ANN001, ANN201
+        return self
+
+    def eval(self):  # noqa: ANN201
+        return self
+
+
+@pytest.fixture
+def real_client(monkeypatch):
+    """create_app mount with the REAL engine and route.
+
+    The plain `client` mounts a bare route over StubEngine, which has no
+    slot-ceiling check -- that guard lives in SystemOneEngine.evaluate
+    (infer.py), and the route maps its ValueError to 422. Limits scenarios
+    must exercise that real path, so we stub only the weights: the guard
+    runs before any forward, and rejects oversized questions offline.
+    """
+    monkeypatch.setattr(
+        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _GuardModel())
+    )
+    app = server.create_app("checkpoints/does-not-exist", device="cpu")
+    return TestClient(app)
+
+
 @pytest.fixture
 def response():
     """Per-scenario scratch space shared between when and then steps."""
