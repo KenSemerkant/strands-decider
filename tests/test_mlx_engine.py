@@ -110,6 +110,16 @@ def engines(request, tmp_path_factory):
     return load_engine(str(path), device="cpu"), load_engine(str(path), device="mlx"), path
 
 
+# The cpu device is the apples-to-apples comparison: MLX's fp32 CPU kernels reproduce the
+# torch answers exactly here (both rounded to 4 places). Metal's fp32 matmul is a
+# reduced-precision fast path with no precise-fp32 switch in mlx (a plain 256x256 mx fp32
+# matmul already differs from the CPU one by ~9e-4 relative), which surfaces as up to 3.0e-4
+# in these rounded probabilities, measured on an M4 Pro. The adapter merge is not part of
+# the gap: merge_lora folds it in fp32 and merging it into torch's weights moves no answer
+# (see test_merging_the_adapter_into_the_torch_weights_changes_no_answer).
+_TOLERANCE = {"cpu": 1.5e-4, "gpu": 1e-3}
+
+
 @pytest.mark.parametrize("device", ["gpu", "cpu"])
 @pytest.mark.parametrize("request_index", range(len(REQUESTS)))
 def test_mlx_answers_as_torch_does(engines, request_index, device):
@@ -126,7 +136,24 @@ def test_mlx_answers_as_torch_does(engines, request_index, device):
     want, have = _probabilities(expected), _probabilities(got)
     assert have.keys() == want.keys()
     for name in want:
-        assert have[name] == pytest.approx(want[name], abs=1.5e-4), name  # rounded to 4 places
+        assert have[name] == pytest.approx(want[name], abs=_TOLERANCE[device]), name
+
+
+def test_merging_the_adapter_into_the_torch_weights_changes_no_answer(engines):
+    # The MLX engine folds the LoRA adapter into the weights at load while torch keeps it
+    # unmerged. Folded into torch's fp32 weights the same way (W + (alpha / r) B A, as
+    # mlx_engine.merge_lora does) no rounded probability moves, so the merge cannot explain
+    # a gap between the engines: what remains on Metal is the fp32 matmul fast path.
+    _, _, path = engines
+    engine = load_engine(str(path), device="cpu")  # a private copy: the fixture stays unmerged
+    engine.model.torso.merge_adapter()
+    merged = [_probabilities(engine.evaluate(r)) for r in REQUESTS]
+    engine.model.torso.unmerge_adapter()
+    plain = [_probabilities(engine.evaluate(r)) for r in REQUESTS]
+    for want, have in zip(merged, plain, strict=True):
+        assert have.keys() == want.keys()
+        for name in want:
+            assert have[name] == pytest.approx(want[name], abs=1e-4), name  # one rounding ulp
 
 
 def test_the_prefix_path_matches_whole_prompts_and_leaves_no_state(engines):
