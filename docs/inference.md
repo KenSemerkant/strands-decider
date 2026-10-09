@@ -189,9 +189,10 @@ name, the checkpoint path, the base model, the number of slots, the maximum leng
 device, the calibration temperature, whether the prefix cache is on, the MLX state-cache
 size (`null` off MLX) and whether the vision tower is kept.
 
-The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
-concurrent requests is not verified. Use it for local experiments only
-([Security](../README.md#security)).
+The server binds to `127.0.0.1` by default and has no authentication. Concurrent requests
+are served by a thread pool; engine evaluations are reentrant and covered by interleaving
+tests (race #9), though the MLX engine serialises them under its lock. Use it for local
+experiments only ([Security](../README.md#security)).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -304,8 +305,11 @@ module layout and prompt-cache classes. The adapter merge refuses DoRA, `modules
 trainable token embeddings, per-module ranks and quantised base weights. `--dtype` in
 `bench_local.py` applies to torch devices only. The engine caps MLX's buffer cache at 1 GiB
 (`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
-Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
-`_option_idx` to read; the torch engine has the same race (#9).
+Evaluations serialise under the engine's lock — not for request-scoped state (race #9 fixed:
+`_fit` returns each request's option offsets, so the torch engine evaluates concurrently) but
+because the MLX forward path is shared per engine: `_decoder`'s lazy arrays belong to the
+evaluating thread's stream, the Metal buffer cache is process-wide, and nothing in mlx-lm
+promises a reentrant model call. The lock also guards `_state_cache` and `state_encodes`.
 
 ### The cross-request state cache
 

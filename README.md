@@ -234,6 +234,7 @@ Three targets matter: **accuracy**, **calibration** and **latency**. v21 and v19
 | Tiers (this repository's split of the public tasks): easy / standard / hard | 1.000 / 0.931 / 0.550 | 1.000 / 0.875 / 0.505 | [evaluation/jevbench.md](evaluation/jevbench.md#board-position-v142-25-september-2026) |
 | Latency per JevBench question, RTX 3090 under WSL2, median / 95th percentile | same architecture and size as v19 | 115 ms / 299 ms | [evaluation/results.md](evaluation/results.md#summary) |
 | Latency per question, M3 Pro (Apple silicon), warm median, under 300 tokens / all tasks | same architecture and size as v19 | 153 ms / 234 ms | [evaluation/results.md](evaluation/results.md#serving-on-a-mac-accuracy-and-latency) |
+| Repeated ~1400-token state, M3 Pro (Apple silicon, MLX), state-cache hit vs miss | 18.8 ms vs 98.2 ms (5.2×) | n/a — cache post-dates v19 | [ADR-004](adr/ADR-004-cross-request-state-cache.md) |
 
 Every task in the easy tier is answered correctly, and the nearest comparison is
 `decider-2b`, which shares v19's torso with a different recipe
@@ -308,6 +309,25 @@ and the record says so. Most runs missed their bar, v20 among them: 169 of 231 a
 failed. [research/README.md](research/README.md) lists each run and its outcome, and
 [research/history.md](research/history.md) tells what moved the benchmark and what did
 not. To propose an experiment, open an issue with a preregistration ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+## What's new
+
+Notable changes since the v21 docs pass, with the full record in
+[CHANGELOG.md](CHANGELOG.md):
+
+- **Cross-request state cache on MLX (KV prefix reuse).** A repeated state skips its
+  forward entirely: 18.8 ms against 98.2 ms on a ~1400-token state, a measured 5.2×
+  ([ADR-004](adr/ADR-004-cross-request-state-cache.md)) — see the Performance table.
+- **Concurrent evaluations (race #9 fixed).** Option offsets are now
+  request-scoped, so the torch engine evaluates concurrently and is covered by
+  deterministic interleaving tests; the MLX engine serialises under its lock —
+  see [docs/inference.md](docs/inference.md).
+- **RLVR with GRPO — proposed.** A PRD and implementation SPEC for
+  reinforcement learning from verifiable rewards live in
+  [`tasks/`](tasks/prd-rlvr-grpo.md); RLHF/DPO/RLCD are rejected there for lack
+  of preference data.
+- **Type and test gates hardened.** The mypy baseline in `src/` is cleared to
+  zero, and the corpus-recipe converters are unit-tested (`tests/test_recipes.py`).
 
 ## Community
 

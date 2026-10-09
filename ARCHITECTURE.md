@@ -153,7 +153,8 @@ graph TB
    `GET /health`). Own request parsing, response shaping, flags. No model knowledge.
 2. **Engine** — `SystemOneEngine` (torch) subclassed by `MLXEngine` (Metal). Owns
    evaluation: batching, prefix caching (intra- and cross-request), the readout, and
-   the single-evaluation lock.
+   request-scoped option offsets (reentrant and concurrent; `MLXEngine` serialises
+   under its own lock — see the race #9 fix).
 3. **Prompting/Schema** — Pydantic question models; rendering of state and questions;
    the question-first window fit (`_fit`) and option-token indexing.
 4. **Backends** — the torso forward on torch (CUDA/MPS/CPU) or mlx-lm (Metal, LoRA
