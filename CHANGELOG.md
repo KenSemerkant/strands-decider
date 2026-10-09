@@ -15,6 +15,10 @@ Unreleased block under it and cut a new empty one.
 
 - Serving benchmark suite (`bench/`, ADR-005): corpus, concurrency and type
   sweeps against the live server; results captured under `bench/results/`.
+- BDD suite (`tests/bdd/`, pytest-bdd): Gherkin scenarios for the
+  user-facing flows — serving, request limits, the agent tool-call gate and
+  the ask CLI — against a stub engine, grounded in the researched use cases
+  of `docs/use-cases.md`.
 - Cross-request state cache for the MLX engine (`--state-cache`, ADR-004):
   18.8 ms against 98.2 ms on a repeated ~1400-token state — a measured 5.2×.
 - Image input for Strands Decider (v19): `serve --vision`, `ask --image`,
