@@ -57,7 +57,7 @@ dev = [
 ]
 
 [project.scripts]
-strands-decider = "strands_decider.cli:app"
+strands-decider = "strands_decider.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -119,6 +119,7 @@ module = [
     "mlx.*",
     "mlx_lm.*",
     "PIL.*",
+    "tokenizers",
 ]
 ignore_missing_imports = true
 

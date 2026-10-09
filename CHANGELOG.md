@@ -28,6 +28,13 @@ Unreleased block under it and cut a new empty one.
   serving endpoint.
 - RLVR with GRPO — PRD and SPEC (proposed, `tasks/prd-rlvr-grpo.md`,
   `tasks/spec-rlvr-grpo.md`). RLHF/DPO/RLCD rejected: no preference data.
+- Merged from upstream: model soup of same-recipe seeds with
+  `val_split_seed` and `ema_decay` (`soup.py`); Gemma 4 torso support
+  (E2B/E4B/12B/26B-A4B); `kl_frozen_reference` — a trained checkpoint as
+  the frozen-KL anchor; `--max-batch-tokens` cap on one forward's padded
+  tokens; channels-last CPU causal conv (`cpu_kernels.py`); faster CLI
+  exit after `ask`. Upstream's chunked evaluate keeps this fork's
+  request-scoped option offsets (race #9 stays fixed).
 - Architecture Decision Records: MLX backend (ADR-003), cross-request state
   cache (ADR-004), benchmark suite (ADR-005), joining the pointer-head (ADR-001)
   and question-first-window (ADR-002) records.

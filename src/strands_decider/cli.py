@@ -7,9 +7,11 @@ calls them through `python -m strands_decider.cli`.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
+import sys
 from collections import Counter
 from itertools import islice
 
@@ -21,7 +23,7 @@ from rich.table import Table
 from .data import recipes as _recipes
 from .data.format import Example, read_jsonl, write_jsonl
 from .prompting import build_prompt
-from .schema import ChoiceQuestion, NoulQuestion, Question, ScoreQuestion
+from .schema import ChoiceQuestion, NoulQuestion, Question, ScoreQuestion, SystemOneResponse
 
 app = typer.Typer(
     name="strands-decider",
@@ -181,6 +183,22 @@ def train_cmd(
     train(cfg)
 
 
+@app.command("soup", hidden=True)
+def soup_cmd(
+    checkpoints: list[str] = typer.Argument(..., help="Checkpoints of one recipe (other seeds)."),
+    out: str = typer.Option(..., "--out", help="Directory for the souped checkpoint: absent or empty."),
+    replace: bool = typer.Option(False, "--replace", help="Delete what --out holds first."),
+) -> None:
+    """Average same-recipe checkpoints by their LoRA updates and head logits (soup.py).
+
+    The soup's temperatures are reset: run `calibrate` on it next.
+    """
+    from .soup import soup
+
+    soup(checkpoints, out, replace=replace)
+    console.print(f"[green]soup of {len(checkpoints)} checkpoints -> {out}[/] (calibrate it next)")
+
+
 @app.command("calibrate", hidden=True)
 def calibrate_cmd(
     checkpoint: str = typer.Argument(...),
@@ -323,6 +341,10 @@ def serve_cmd(
         help="mlx only: states cached across requests (LRU); 0 disables. A repeated state "
         "skips its forward entirely.",
     ),
+    max_batch_tokens: int | None = typer.Option(
+        None, "--max-batch-tokens",
+        help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
+    ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     from .server import serve
@@ -335,6 +357,7 @@ def serve_cmd(
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
         strict_window=strict_window, max_batch=max_batch, vision=vision,
         state_cache=state_cache,
+        max_batch_tokens=max_batch_tokens,
     )
 
 
@@ -401,8 +424,14 @@ def ask_cmd(
 
     if as_json:
         console.print_json(response.model_dump_json())
-        return
+    else:
+        _print_answers(response)
+    # `ask` is done once its answer is printed; see main().
+    global _exit_fast
+    _exit_fast = True
 
+
+def _print_answers(response: SystemOneResponse) -> None:
     for name, ans in response.answers.items():
         if ans.type == "noul":
             console.print(f"[bold]{name}[/] noul = [cyan]{ans.noul:.3f}[/]")
@@ -431,5 +460,36 @@ def info_cmd(checkpoint: str = typer.Argument(...)) -> None:
     console.print_json(cfg.to_json())
 
 
+# Set by a command whose work is finished once it returns; read by main().
+_exit_fast = False
+
+
+def main() -> None:
+    """Console-script entry point: `app()`, then a fast exit after a finished `ask`.
+
+    Interpreter shutdown after `ask` takes about 0.5 s on an M3 Pro: torch, MPS and
+    every imported module are finalized. A one-shot `ask` holds nothing that needs
+    that (no open files, no child processes), so once its answer is printed it runs
+    the atexit handlers, flushes and leaves with os._exit. The handlers take a few ms
+    and must run: multiprocessing's unlinks the named semaphore behind tqdm's lock (the
+    "Loading weights" bar), and without it the resource tracker warns of a leaked
+    semaphore after the prompt is back, wherever the start method is spawn or
+    forkserver (macOS). Every other command, and anything that calls `app` directly
+    (typer's CliRunner, an embedding program), exits normally.
+    """
+    try:
+        app()
+    except SystemExit as e:
+        code = e.code
+    else:
+        code = 0
+    if not (_exit_fast and code in (0, None)):
+        sys.exit(code)
+    atexit._run_exitfuncs()  # noqa: SLF001 -- no public API runs the handlers early
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 if __name__ == "__main__":  # pragma: no cover
-    app()
+    main()

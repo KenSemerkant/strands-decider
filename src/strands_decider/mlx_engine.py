@@ -207,10 +207,10 @@ class MLXEngine(SystemOneEngine):
         return snap
 
     def _slot_probs_batched(
-        self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
+        self, state: list[int], questions: list[list[int]], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
+        offsets: list[list[tuple[int, int]]] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions, offsets = self._fit(state_text, question_texts)
         snap = self._state_snapshot(state) if self.state_cache_entries else None
         if snap is not None:
             # A cached state serves even one question through the suffix-only path: the
@@ -228,10 +228,10 @@ class MLXEngine(SystemOneEngine):
         return probs, sum(len(row) for row in rows)
 
     def _slot_probs_shared_prefix(
-        self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
+        self, state: list[int], questions: list[list[int]], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
+        offsets: list[list[tuple[int, int]]] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions, offsets = self._fit(state_text, question_texts)
         snap = self._state_snapshot(state) if self.state_cache_entries else None
         if snap is None:
             prefix = make_prompt_cache(self._cache_owner)

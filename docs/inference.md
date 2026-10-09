@@ -78,8 +78,14 @@ strands-decider serve checkpoints/hobson-2b-recipe --device mlx --port 8099
 
 **CPU only.** The same commands as on macOS, with `--device cpu`. On Linux without a GPU,
 `pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu` skips the CUDA
-wheels. Both reference fallback paths above apply, and inference is much slower than on a
-GPU.
+wheels. `chunk_gated_delta_rule` falls back to its reference path, and inference is much
+slower than on a GPU. `causal_conv1d_fn` does not: on CPU, `cpu_kernels.py` replaces it with
+four shifted multiply-adds over channels-last rows, with the same answers to float rounding.
+Torch builds without oneDNN, such as the macOS wheels, run the reference as one convolution
+per channel: 2.0 of 2.7 s of a 70-token v19 forward on an M3 Pro, against 8 ms. Linux x86
+wheels have oneDNN, and the reference is fast there for short states. On a Xeon 8375C
+(8 threads), the conv takes 35 ms of a 1.6 s v21 ask either way, and on a 3,000-token state
+it takes 0.49 s instead of 1.18 s.
 
 ## Model artifact
 
@@ -220,6 +226,12 @@ cut, and the question keeps its options. `--strict-window` refuses such a prompt
 with HTTP 422 and a message that names the context window, for an evaluation that forbids
 truncation. `--max-batch N` (default 32) sets how many questions one forward pass encodes;
 lower it when a very long state with many questions does not fit in GPU memory.
+`--max-batch-tokens N` also caps the tokens of one forward, as the forward pads them: its
+questions times the longest state + question, after each is fitted to the window. A forward
+then ends early, before it would pass N tokens, and always holds at least one question.
+Questions are fitted before the cut and scored independently, so answers change only by
+float rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; unset, only
+`--max-batch` applies.
 
 ## Asking many questions is nearly free
 

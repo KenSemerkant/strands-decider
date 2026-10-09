@@ -40,6 +40,10 @@ class TrainConfig:
     train_files: list[str] = field(default_factory=list)
     val_files: list[str] = field(default_factory=list)
     val_fraction: float = 0.03
+    # Seed of that train/validation split alone. None: `seed`, so every seed holds out (and
+    # so never trains on) its own val_fraction of the rows. Fixed, every seed trains on the
+    # same rows; initialisation, data order and option order still follow `seed`.
+    val_split_seed: int | None = None
 
     # model
     base_model: str = "Qwen/Qwen3-1.7B-Base"
@@ -54,6 +58,12 @@ class TrainConfig:
     # such as Qwen3.5 needs its recurrent layers' projections listed too, or LoRA reaches
     # only its few full-attention layers.
     lora_targets: list[str] | None = None
+    # Start every prompt with BOS even if the tokenizer adds none (modeling.ensure_bos);
+    # gemma-4-E2B-it's tokenizer leaves it to the chat template.
+    force_bos: bool = False
+    # Keep a per-layer embedding table (Gemma 4 E2B's, 4.4 GiB) in host memory
+    # (modeling.HostEmbedding). For one GPU: under torchrun every rank would hold a copy.
+    host_embeddings: bool = False
     freeze_torso: bool = False
     # "lm_head" seeds the slot head from the LM's own option-number readout rather
     # than at random. Measured teacher quality for that readout on JevBench is
@@ -64,6 +74,12 @@ class TrainConfig:
     head_init: str = "random"
     # >0 adds KL(frozen || student) so training cannot drift away from that readout.
     kl_frozen_weight: float = 0.0
+    # A trained checkpoint whose option distribution (temperature 1, no calibration) is the
+    # frozen-KL reference in place of the untouched torso's option-number readout. The same
+    # rows are eligible (at most as many options as the readout covers). It may have
+    # another tokenizer than the student (`_frozen_reference`). Needs precompute_frozen_kl:
+    # the reference is computed once, before step 1. None: the untouched torso, as before.
+    kl_frozen_reference: str | None = None
     # Rows trained ONLY by that KL term: no label loss, never in the validation split.
     # For prompts with no gold answer -- e.g. changed questions, where the frozen
     # torso's own reading is the target (data/question_transforms.py). Each needs <= 9
@@ -77,6 +93,10 @@ class TrainConfig:
     # Rows it covers get teacher_weight * KL(teacher || student) on top of the label loss.
     teacher_file: str | None = None
     teacher_weight: float = 0.0
+    # Direction of both KL terms, the teacher's and the frozen anchor's: "forward" =
+    # KL(target || student) (mass-covering, every run so far); "reverse" = KL(student ||
+    # target) (mode-seeking).
+    kl_direction: str = "forward"
     # Continue from an existing checkpoint, keeping its trained LoRA adapter and
     # attaching a freshly-initialised head. `freeze_torso` alone cannot do this: it
     # drops the adapter and freezes the *base* torso, which would train the new head
@@ -94,6 +114,11 @@ class TrainConfig:
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
+    # > 0 keeps an exponential moving average of the trained weights (adapter and head), in
+    # fp32, updated after every optimizer step with decay min(ema_decay, (1 + step) /
+    # (10 + step)); the average is what is validated at the end and saved. 0 = off: the last
+    # step's weights, as before.
+    ema_decay: float = 0.0
     gradient_checkpointing: bool = True
 
     # data augmentation
@@ -178,6 +203,36 @@ def _build_optimizer(model: StrandsDeciderModel, cfg: TrainConfig) -> torch.opti
     return torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8)
 
 
+class _Ema:
+    """An fp32 exponential moving average of `model`'s trainable parameters."""
+
+    def __init__(self, model: torch.nn.Module, decay: float):
+        self.decay = decay
+        self.params = [p for p in model.parameters() if p.requires_grad]
+        self.avg = [p.detach().float().clone() for p in self.params]
+        self.live: list[torch.Tensor] = []
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def update(self, step: int) -> None:
+        # The warm-up keeps the first steps' weights, far from the end ones, out of the average.
+        d = min(self.decay, (1 + step) / (10 + step))
+        for a, p in zip(self.avg, self.params, strict=True):
+            a.mul_(d).add_(p.detach().float(), alpha=1 - d)
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def apply(self) -> None:
+        """Put the average in the model, keeping the live weights for `restore`."""
+        self.live = [p.detach().clone() for p in self.params]
+        for a, p in zip(self.avg, self.params, strict=True):
+            p.copy_(a)
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def restore(self) -> None:
+        for w, p in zip(self.live, self.params, strict=True):
+            p.copy_(w)
+        self.live = []
+
+
 def _lr_lambda(step: int, warmup: int, total: int) -> float:
     if step < warmup:
         return step / max(1, warmup)
@@ -222,7 +277,8 @@ FROZEN_PASS_TOKENS = 32768
 
 
 def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batches: list[list[int]],
-                      coll_cfg: CollatorConfig, device: str) -> torch.Tensor:
+                      coll_cfg: CollatorConfig, device: str,
+                      ref_model: StrandsDeciderModel | None = None) -> torch.Tensor:
     """`frozen_slot_log_probs` for every row the run trains on: ref[micro-batch, row].
 
     A fresh collator with the training collator's seed walks the run's micro-batches in
@@ -233,9 +289,17 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
     recurrence), the reference is the adapter-disabled torso whose weights training never
     changes, and it draws no random numbers -- so only the batch shapes differ from
     computing it inside each step.
+
+    With `ref_model` (kl_frozen_reference), each rendered micro-batch goes through that
+    checkpoint as it is, at temperature 1, instead; columns past a row's options are -inf.
+    The reference renders with its own tokenizer, so it may have another than the
+    student's (a Gemma student, a Qwen reference): the table is over option slots, and the
+    collator draws option order and phrasing from its seed alone, before any tokenisation,
+    so both see each row with the same options in the same slots.
     """
     rank, _, world = distributed.env()
-    coll = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
+    tok = model.tokenizer if ref_model is None else ref_model.tokenizer
+    coll = SystemOneCollator(tok, coll_cfg, train=True)
     ref = torch.zeros(len(batches), max(map(len, batches)), model.config.num_slots,
                       device=device)
     todo: list[Any] = []  # (micro-batch, row, token ids, option count)
@@ -245,6 +309,16 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
             coll.skip(rows)
             continue
         b = coll(rows)
+        if ref_model is not None:
+            with torch.no_grad():
+                lp = ref_model(input_ids=b["input_ids"].to(device),
+                               attention_mask=b["attention_mask"].to(device),
+                               n_slots=b["n_slots"].to(device), opt_idx=b["opt_idx"].to(device)
+                               if "opt_idx" in b else None, temperature=1.0)["log_probs"]
+            w = min(lp.shape[-1], ref.shape[-1])
+            ref[m, : len(rows)] = float("-inf")
+            ref[m, : len(rows), :w] = lp[:, :w]
+            continue
         for r in range(len(rows)):
             n = int(b["attention_mask"][r].sum())
             todo.append((m, r, b["input_ids"][r, :n], int(b["n_slots"][r])))
@@ -266,9 +340,43 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
     return ref
 
 
+def _kl(target: torch.Tensor, student: torch.Tensor, valid: torch.Tensor, direction: str,
+        target_probs: torch.Tensor | None = None) -> torch.Tensor:
+    """Per-row KL between two log-distributions over the `valid` entries: forward =
+    KL(target || student), reverse = KL(student || target). `target_probs`, when the caller
+    has them, weight the forward sum in place of exp(target)."""
+    p, q = (target, student) if direction == "forward" else (student, target)
+    diff = (p - q).masked_fill(~valid, 0.0)
+    w = target_probs if direction == "forward" and target_probs is not None else p.exp()
+    return (w.masked_fill(~valid, 0.0) * diff).sum(dim=-1)
+
+
+# The teacher writer rounds to six decimals, so a real option can carry a target of exactly 0.
+REVERSE_KL_TARGET_FLOOR = 1e-6
+
+
+def _teacher_kl(tea: torch.Tensor, stu: torch.Tensor, direction: str) -> torch.Tensor:
+    """Per-row KL between a teacher's option probabilities `tea` (0 past a row's options) and
+    the student's log-probabilities `stu` (-inf past them). Forward skips the teacher's zeros,
+    which carry no weight in KL(teacher || student). Reverse must charge student mass on them,
+    so it floors the target on every real option at REVERSE_KL_TARGET_FLOOR and renormalises."""
+    real = torch.isfinite(stu)
+    if direction == "forward":
+        return _kl(tea.clamp_min(1e-12).log(), stu, (tea > 0) & real, direction, tea)
+    floored = tea.clamp_min(REVERSE_KL_TARGET_FLOOR).masked_fill(~real, 0.0)
+    target = floored / floored.sum(dim=-1, keepdim=True)
+    return _kl(target.clamp_min(1e-12).log(), stu, real, direction)
+
+
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
+    if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
+        raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
+    if cfg.kl_direction not in ("forward", "reverse"):
+        raise ValueError(f"kl_direction must be forward or reverse, not {cfg.kl_direction!r}")
+    if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
+        raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -283,6 +391,8 @@ def train(cfg: TrainConfig) -> str:
         use_lora=cfg.use_lora and not cfg.freeze_torso,
         lora_r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
+        force_bos=cfg.force_bos,
+        host_embeddings=cfg.host_embeddings,
         # Serving needs this to correct the variance floor smoothing imposes on
         # score confidence; without it a score could never reach high confidence.
         ordinal_smoothing=cfg.ordinal_smoothing,
@@ -364,7 +474,8 @@ def train(cfg: TrainConfig) -> str:
         val_examples = load_examples(cfg.val_files)
     else:
         train_examples, val_examples = split_examples(
-            train_examples, val_fraction=cfg.val_fraction, seed=cfg.seed
+            train_examples, val_fraction=cfg.val_fraction,
+            seed=cfg.seed if cfg.val_split_seed is None else cfg.val_split_seed,
         )
     if cfg.kl_only_files:
         if cfg.kl_frozen_weight <= 0:
@@ -458,11 +569,23 @@ def train(cfg: TrainConfig) -> str:
         run = [b for e in range(cfg.epochs) for b in sampler.batches(e)]
         t_ref = time.time()
         model.train()  # the mode the in-step reference forward runs in
+        ref_model = None
+        if cfg.kl_frozen_reference:
+            ref_model = StrandsDeciderModel.load(cfg.kl_frozen_reference,
+                                                 attn_implementation=cfg.attn_implementation)
+            ref_model.to(device).eval()
+            own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
+            print(f"[strands-decider] frozen-KL reference: {cfg.kl_frozen_reference}"
+                  + ("" if own else " (its own tokenizer, not the student's)"))
         refs = _frozen_reference(model, train_examples, run[: total_steps * cfg.grad_accum],
-                                 coll_cfg, device)
+                                 coll_cfg, device, ref_model)
+        del ref_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
         print(f"[strands-decider] frozen-KL reference for {refs.shape[0]:,} micro-batches "
               f"in {time.time() - t_ref:.0f} s")
 
+    ema = _Ema(model, cfg.ema_decay) if cfg.ema_decay > 0 else None
     print(f"[strands-decider] {total_steps} optimizer steps (warmup {warmup})")
     model.train()
     step, micro, running, t0 = 0, 0, 0.0, time.time()
@@ -511,9 +634,7 @@ def train(cfg: TrainConfig) -> str:
                     # the sum to entries finite on both sides rather than patching
                     # the NaN afterwards.
                     valid = torch.isfinite(ref) & torch.isfinite(stu)
-                    p = ref.exp().masked_fill(~valid, 0.0)
-                    diff = (ref - stu).masked_fill(~valid, 0.0)
-                    per_row = (p * diff).sum(dim=-1)
+                    per_row = _kl(ref, stu, valid, cfg.kl_direction)
                     kl = per_row.mean() * part.kl
                     if cfg.kl_only_files:
                         # KL-only rows (weight 0) carry their own KL weight; with none
@@ -528,9 +649,7 @@ def train(cfg: TrainConfig) -> str:
                 has = batch["has_teacher"]
                 stu = out["log_probs"][has]
                 tea = batch["teacher"][has][:, : stu.shape[-1]]
-                valid = (tea > 0) & torch.isfinite(stu)
-                diff = (tea.clamp_min(1e-12).log() - stu).masked_fill(~valid, 0.0)
-                tkl = (tea.masked_fill(~valid, 0.0) * diff).sum(dim=-1).mean() * part.teacher
+                tkl = _teacher_kl(tea, stu, cfg.kl_direction).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
                 running_tkl += float(tkl)
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.
@@ -550,6 +669,8 @@ def train(cfg: TrainConfig) -> str:
             sched.step()
             optim.zero_grad(set_to_none=True)
             step += 1
+            if ema is not None:
+                ema.update(step)
 
             if step % cfg.log_every == 0:
                 running, running_kl, running_tkl = distributed.all_reduce(
@@ -580,7 +701,11 @@ def train(cfg: TrainConfig) -> str:
                 history.append({"step": step, **metrics})
 
             if cfg.save_every and step % cfg.save_every == 0 and rank == 0:
+                if ema is not None:
+                    ema.apply()  # save the average, then train on from the live weights
                 model.save_pretrained(cfg.output_dir)
+                if ema is not None:
+                    ema.restore()
 
             if step >= total_steps:
                 done = True
@@ -588,6 +713,8 @@ def train(cfg: TrainConfig) -> str:
 
     if rank != 0:
         return cfg.output_dir
+    if ema is not None:
+        ema.apply()
     metrics = evaluate_loss(model, val_loader, device)
     print(f"[strands-decider] final eval: {metrics}")
     history.append({"step": step, **metrics})
