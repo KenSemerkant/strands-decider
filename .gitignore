@@ -34,3 +34,7 @@ build/
 dist/
 # Runner output written inside the checkout (training/run_recipe.sh RUN_DIR default)
 /runs/
+# Coverage artifacts (pytest-cov local runs)
+.coverage
+coverage.json
+coverage.xml
