@@ -414,7 +414,9 @@ class VisionEngine(SystemOneEngine):
             from transformers import Qwen2VLImageProcessorPil
 
             image_processor = Qwen2VLImageProcessorPil.from_pretrained(
-                model.config.base_model, revision=model.config.base_revision
+                # None means the default revision at runtime; this stub asks for a str.
+                model.config.base_model,
+                revision=model.config.base_revision,  # type: ignore[arg-type]
             )
         self.image_processor = image_processor
 
@@ -507,7 +509,7 @@ class VisionEngine(SystemOneEngine):
         s = s[:budget]
         return s, q, mm, offsets
 
-    @torch.inference_mode()  # type: ignore[untyped-decorator]
+    @torch.inference_mode()
     def _image_probs(
         self, state: Content, images: list[Image.Image], rendered: list[RenderedQuestion]
     ) -> tuple[torch.Tensor, int]:

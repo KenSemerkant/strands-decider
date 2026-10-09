@@ -254,7 +254,7 @@ class SystemOneEngine:
 
     # ---- low level -------------------------------------------------------
 
-    @torch.inference_mode()  # type: ignore[untyped-decorator]
+    @torch.inference_mode()
     def _slot_probs_batched(
         self, state_text: str, question_texts: list[str],
         n_slots: list[int], kinds: list[str],
@@ -282,7 +282,7 @@ class SystemOneEngine:
         )
         return out["log_probs"].exp(), int(mask.sum().item())
 
-    @torch.inference_mode()  # type: ignore[untyped-decorator]
+    @torch.inference_mode()
     def _slot_probs_shared_prefix(
         self,
         state_text: str,
@@ -476,7 +476,7 @@ def _to_answer(
     )
 
 
-@torch.inference_mode()  # type: ignore[untyped-decorator]
+@torch.inference_mode()
 def load_engine(
     checkpoint: str,
     *,

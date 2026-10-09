@@ -20,7 +20,7 @@ import contextlib
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -118,7 +118,9 @@ class SlotHead(nn.Module):
             self.proj = nn.Linear(hidden_size, num_slots)
 
     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.dropout(self.norm(pooled)))
+        # nn.Module.__call__ is typed Any, so name the result rather than return it.
+        out: torch.Tensor = self.proj(self.dropout(self.norm(pooled)))
+        return out
 
 
 class PointerHead(nn.Module):
@@ -149,12 +151,12 @@ class PointerHead(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.q = nn.Linear(hidden_size, dim)
         self.k = nn.Linear(hidden_size, dim)
-        self.scale = dim ** -0.5
+        self.scale: float = dim ** -0.5
 
     def forward(self, decide: torch.Tensor, options: torch.Tensor) -> torch.Tensor:
         """decide [B, d], options [B, K, d] -> logits [B, K]."""
-        d = self.q(self.dropout(self.norm(decide))).unsqueeze(-1)   # [B, dim, 1]
-        o = self.k(self.dropout(self.norm(options)))                # [B, K, dim]
+        d: torch.Tensor = self.q(self.dropout(self.norm(decide))).unsqueeze(-1)  # [B, dim, 1]
+        o: torch.Tensor = self.k(self.dropout(self.norm(options)))  # [B, K, dim]
         return (o @ d).squeeze(-1) * self.scale
 
 
@@ -304,7 +306,7 @@ class StrandsDeciderModel(nn.Module):
         else:
             torso = AutoModel.from_pretrained(config.base_model, **kwargs)
         torso.config.use_cache = True
-        return torso
+        return cast(nn.Module, torso)  # from_pretrained is typed Any in transformers
 
     @staticmethod
     def is_hybrid(torso: nn.Module) -> bool:
@@ -352,7 +354,8 @@ class StrandsDeciderModel(nn.Module):
             use_cache=past_key_values is not None,
             return_dict=True,
         )
-        return out.last_hidden_state
+        hidden: torch.Tensor = out.last_hidden_state
+        return hidden
 
 
     # ---- pretrained-readout hooks ------------------------------------------
@@ -378,7 +381,7 @@ class StrandsDeciderModel(nn.Module):
         `AutoModel` never loads `lm_head`, so without the tie there would be nothing
         to read; assert rather than silently seeding from an unrelated matrix.
         """
-        base = self.torso
+        base: Any = self.torso
         base = getattr(base, "base_model", base)
         base = getattr(base, "model", base)
         emb = base.get_input_embeddings() if hasattr(base, "get_input_embeddings") else None
@@ -389,7 +392,8 @@ class StrandsDeciderModel(nn.Module):
             raise RuntimeError(
                 "base model does not tie embeddings, so the input table is not the LM head"
             )
-        return emb.weight
+        weight: torch.Tensor = emb.weight
+        return weight
 
     def init_head_from_lm_head(self) -> int:
         """Seed the slot head with the LM's own option-number readout directions."""
@@ -397,7 +401,8 @@ class StrandsDeciderModel(nn.Module):
             raise ValueError("lm_head init applies to the linear head only")
         table = self._output_embedding()
         slots = self.slot_token_ids()
-        proj = self.head.proj
+        # Reached only with the linear slot head; self.head is typed as the nn.Module build_head returns.
+        proj: Any = self.head.proj
         with torch.no_grad():
             rows = table[list(slots.values())].to(torch.float32)
             # Match the scale the randomly-initialised head was given, so the change
@@ -494,7 +499,8 @@ class StrandsDeciderModel(nn.Module):
             fh.write(self.config.to_json())
         torch.save(self.head.state_dict(), os.path.join(path, "slot_head.pt"))
         if self.config.use_lora:
-            self.torso.save_pretrained(os.path.join(path, "lora"))
+            # Only the PEFT wrapper has save_pretrained; nn.Module does not.
+            cast(Any, self.torso).save_pretrained(os.path.join(path, "lora"))
         self.tokenizer.save_pretrained(path)
 
     @classmethod

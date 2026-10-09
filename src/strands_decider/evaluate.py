@@ -107,7 +107,7 @@ class Prediction:
         return derive_confidence(self.probs)
 
 
-@torch.no_grad()  # type: ignore[untyped-decorator]
+@torch.no_grad()
 def collect_logits(
     model: StrandsDeciderModel,
     examples: list[Example],
@@ -183,7 +183,7 @@ def predictions_from_logits(
 ) -> list[Prediction]:
     """`temperature` is a scalar, or a {kind: temperature} map for per-primitive fits."""
     if isinstance(temperature, dict):
-        t = torch.tensor(
+        t: Any = torch.tensor(
             [float(temperature.get(ex.kind, 1.0)) for ex in examples],
             dtype=torch.float32,
         ).view(-1, 1)
