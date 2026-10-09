@@ -123,12 +123,14 @@ def response():
 
 class FakeDecider:
     """Stands in for examples/strands/_client.py Decider: ask() returns canned
-    noul probabilities, chosen per scenario through its answer attribute."""
+    noul probabilities, chosen per scenario through its answer attribute, or
+    per question through per_question (which wins for the names it lists)."""
 
     def __init__(self):
         self.answer: float = 1.0
+        self.per_question: dict[str, float] = {}
         self.states: list[str] = []
 
     def ask(self, state, questions):
         self.states.append(state)
-        return {name: {"noul": self.answer} for name in questions}
+        return {name: {"noul": self.per_question.get(name, self.answer)} for name in questions}
